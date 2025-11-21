@@ -64,7 +64,6 @@ jobs:
           chmod 600 "${ENVFILE}"
           echo "APP_ENV=${ENV}" >> "${ENVFILE}"
 
-          # Map of KEY:SECRET_NAME - edit to match your Secret Manager names
           declare -a MAP=(
             "DATABASE_URL:myapp-DB-URL-${ENV}"
             "JWT_SECRET:myapp-JWT-SECRET-${ENV}"
@@ -84,7 +83,7 @@ jobs:
 
           echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact and env to VM (secure, IAP)
+      - name: Upload artifact & env to VM
         run: |
           set -euo pipefail
           APP="${{ github.event.inputs.app }}"
@@ -94,11 +93,10 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          # Copy artifact and env via IAP tunnel (VM does not need public SSH)
           gcloud compute scp --quiet --zone="${ZONE}" "${ART}" "${USER}@${VM}:/tmp/${APP}.tar.gz" --tunnel-through-iap
           gcloud compute scp --quiet --zone="${ZONE}" "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env" --tunnel-through-iap
 
-      - name: Run deploy script on VM (restart service)
+      - name: Deploy on VM
         run: |
           set -euo pipefail
           APP="${{ github.event.inputs.app }}"
@@ -106,21 +104,24 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_CMD=$(cat <<'REMOTE'
+          REMOTE_CMD=$(cat << 'EOF2'
             set -euo pipefail
-            APP="{{APP}}"
             TARGET_DIR="/opt/apps/${APP}"
             mkdir -p "${TARGET_DIR}"
             tar -xzf "/tmp/${APP}.tar.gz" -C "${TARGET_DIR}"
             mv /tmp/${APP}.env "${TARGET_DIR}/.env"
             chmod 600 "${TARGET_DIR}/.env"
+
             if [ -x "${TARGET_DIR}/scripts/migrate.sh" ]; then
               bash "${TARGET_DIR}/scripts/migrate.sh" || true
             fi
+
             systemctl daemon-reload || true
             systemctl restart ${APP}.service || true
-            echo "deployed ${APP}"
-REMOTE
+            echo "Deployment complete for ${APP}"
+EOF2
 )
+
           REMOTE_CMD=$(echo "${REMOTE_CMD}" | sed "s/{{APP}}/${APP}/g")
-          gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD}" --tunnel-through-iap
+          gcloud compute ssh --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD}" --tunnel-through-iap
+
