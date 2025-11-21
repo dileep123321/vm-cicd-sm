@@ -4,15 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'env to deploy'
+        description: "env to deploy"
         required: true
-        default: 'dev'
+        default: "dev"
         type: choice
-        options: ['dev', 'stage', 'prod']
+        options:
+          - dev
+          - stage
+          - prod
       app:
-        description: 'app folder to deploy'
+        description: "app folder to deploy"
         required: true
-        default: 'app1'
+        default: "app1"
 
 permissions:
   id-token: write
@@ -21,7 +24,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
+    environment: \${{ github.event.inputs.environment }}
 
     steps:
       - name: Checkout repo
@@ -30,104 +33,85 @@ jobs:
       - name: Authenticate to GCP (WIF)
         uses: google-github-actions/auth@v1
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
-          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          workload_identity_provider: \${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: \${{ secrets.GCP_SA_EMAIL }}
 
       - name: Configure gcloud project
         run: |
           gcloud config set project kxnwork
-          gcloud auth list --filter=status:ACTIVE --format="value(account)"
 
-      - name: Build artifact (tar.gz)
+      - name: Build artifact
         run: |
-          set -euo pipefail
-          APP="${{ github.event.inputs.app }}"
+          APP="\${{ github.event.inputs.app }}"
           mkdir -p dist
-          if [ -f "${APP}/package.json" ]; then
-            cd "${APP}"
-            npm ci
-            npm run build
-            cd -
-          fi
-          tar -czf dist/${APP}.tar.gz ${APP}
+          tar -czf dist/\${APP}.tar.gz \${APP}
 
-      - name: Fetch secrets from Secret Manager (create .env)
+      - name: Fetch secrets from Secret Manager
         id: secrets
         run: |
           set -euo pipefail
-          APP="${{ github.event.inputs.app }}"
-          ENV="${{ github.event.inputs.environment }}"
-          TMPDIR=$(mktemp -d)
-          ENVFILE="${TMPDIR}/${APP}.env"
-          umask 077
-          touch "${ENVFILE}"
-          chmod 600 "${ENVFILE}"
-          echo "APP_ENV=${ENV}" >> "${ENVFILE}"
+          APP="\${{ github.event.inputs.app }}"
+          ENV="\${{ github.event.inputs.environment }}"
 
-          # Map of KEY:SECRET_NAME - edit to match your Secret Manager names
+          TMPDIR=\$(mktemp -d)
+          ENVFILE="\$TMPDIR/\${APP}.env"
+
+          umask 077
+          touch "\$ENVFILE"
+          chmod 600 "\$ENVFILE"
+
+          echo "APP_ENV=\$ENV" >> "\$ENVFILE"
+
           declare -a MAP=(
-            "DATABASE_URL:myapp-DB-URL-${ENV}"
-            "JWT_SECRET:myapp-JWT-SECRET-${ENV}"
-            "API_KEY:myapp-API-KEY-${ENV}"
+            "DATABASE_URL:myapp-DB-URL-\${ENV}"
+            "JWT_SECRET:myapp-JWT-SECRET-\${ENV}"
+            "API_KEY:myapp-API-KEY-\${ENV}"
           )
 
-          for m in "${MAP[@]}"; do
-            KEY="${m%%:*}"
-            SECRET_NAME="${m##*:}"
-            SECRET_VAL=$(gcloud secrets versions access latest --secret="${SECRET_NAME}" --format='get(payload.data)' | base64 --decode 2>/dev/null || true)
-            if [ -z "${SECRET_VAL}" ]; then
-              echo "Secret ${SECRET_NAME} not found or empty" >&2
+          for item in "\${MAP[@]}"; do
+            KEY="\${item%%:*}"
+            SECRET_NAME="\${item##*:}"
+            VALUE=\$(gcloud secrets versions access latest --secret="\$SECRET_NAME" --format='get(payload.data)' | base64 --decode 2>/dev/null || true)
+            if [ -z "\$VALUE" ]; then
+              echo "Missing secret: \$SECRET_NAME" >&2
               exit 1
             fi
-            printf '%s="%s"\n' "${KEY}" "${SECRET_VAL}" >> "${ENVFILE}"
+            printf '%s="%s"\n' "\$KEY" "\$VALUE" >> "\$ENVFILE"
           done
 
-          echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
+          echo "envfile=\$ENVFILE" >> "\$GITHUB_OUTPUT"
 
-      - name: Upload artifact and env to VM (secure, IAP)
+      - name: Upload artifact and env to VM
         run: |
-          set -euo pipefail
-          APP="${{ github.event.inputs.app }}"
-          ART="dist/${APP}.tar.gz"
-          ENVFILE="${{ steps.secrets.outputs.envfile }}"
-          VM="${{ secrets.TARGET_VM_NAME }}"
-          ZONE="${{ secrets.TARGET_VM_ZONE }}"
-          USER="${{ secrets.TARGET_VM_USER }}"
+          APP="\${{ github.event.inputs.app }}"
+          VM="\${{ secrets.TARGET_VM_NAME }}"
+          ZONE="\${{ secrets.TARGET_VM_ZONE }}"
+          USER="\${{ secrets.TARGET_VM_USER }}"
+          ENVFILE="\${{ steps.secrets.outputs.envfile }}"
 
-          # Copy artifact and env via IAP tunnel (VM does not need public SSH)
-          gcloud compute scp --quiet --zone="${ZONE}" "${ART}" "${USER}@${VM}:/tmp/${APP}.tar.gz" --tunnel-through-iap
-          gcloud compute scp --quiet --zone="${ZONE}" "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env" --tunnel-through-iap
+          gcloud compute scp --zone="\$ZONE" --tunnel-through-iap dist/\${APP}.tar.gz "\${USER}@\${VM}:/tmp/\${APP}.tar.gz"
+          gcloud compute scp --zone="\$ZONE" --tunnel-through-iap "\$ENVFILE" "\${USER}@\${VM}:/tmp/\${APP}.env"
 
-      - name: Run deploy script on VM (restart service)
+      - name: Deploy on VM
         run: |
-          set -euo pipefail
-          APP="${{ github.event.inputs.app }}"
-          VM="${{ secrets.TARGET_VM_NAME }}"
-          ZONE="${{ secrets.TARGET_VM_ZONE }}"
-          USER="${{ secrets.TARGET_VM_USER }}"
+          APP="\${{ github.event.inputs.app }}"
+          VM="\${{ secrets.TARGET_VM_NAME }}"
+          ZONE="\${{ secrets.TARGET_VM_ZONE }}"
+          USER="\${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_CMD=$(cat <<'REMOTE'
+          CMD=$(cat << 'SCRIPT'
             set -euo pipefail
             APP="{{APP}}"
-            TARGET_DIR="/opt/apps/${APP}"
-            mkdir -p "${TARGET_DIR}"
-            tar -xzf "/tmp/${APP}.tar.gz" -C "${TARGET_DIR}"
-            mv /tmp/${APP}.env "${TARGET_DIR}/.env"
-            chmod 600 "${TARGET_DIR}/.env"
-            if [ -x "${TARGET_DIR}/scripts/migrate.sh" ]; then
-              bash "${TARGET_DIR}/scripts/migrate.sh" || true
-            fi
+            DIR="/opt/apps/\${APP}"
+            mkdir -p "\$DIR"
+            tar -xzf "/tmp/\${APP}.tar.gz" -C "\$DIR"
+            mv "/tmp/\${APP}.env" "\$DIR/.env"
+            chmod 600 "\$DIR/.env"
             systemctl daemon-reload || true
-            systemctl restart ${APP}.service || true
-            echo "deployed ${APP} to ${TARGET_DIR}"
-REMOTE
-)
-          REMOTE_CMD=$(echo "${REMOTE_CMD}" | sed "s/{{APP}}/${APP}/g")
-          gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD}" --tunnel-through-iap
+            systemctl restart \${APP}.service || true
+SCRIPT
+          )
 
-      - name: Cleanup temporary runner files
-        if: always()
-        run: |
-          set -euo pipefail
-          APP="${{ github.event.inputs.app }}"
-          rm -f dist/${APP}.tar.gz
+          CMD=\$(echo "\$CMD" | sed "s/{{APP}}/\${APP}/g")
+
+          gcloud compute ssh "\${USER}@\${VM}" --zone="\$ZONE" --tunnel-through-iap --command "\$CMD"
