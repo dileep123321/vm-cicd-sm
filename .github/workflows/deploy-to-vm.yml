@@ -4,18 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment to deploy'
+        description: "Environment to deploy"
         required: true
-        default: 'dev'
+        default: "dev"
         type: choice
         options:
           - dev
           - stage
           - prod
+
       app:
-        description: 'Backend application folder name'
+        description: "Backend application folder name"
         required: true
-        default: 'app1'
+        default: "app1"
 
 permissions:
   id-token: write
@@ -65,7 +66,6 @@ jobs:
           umask 077
           touch "${ENVFILE}"
           chmod 600 "${ENVFILE}"
-
           echo "APP_ENV=${ENV}" >> "${ENVFILE}"
 
           declare -a MAP=(
@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="${{ github.event.inputs.app }}"
-          ART=dist/${APP}.tar.gz
+          ART="dist/${APP}.tar.gz"
           ENVFILE="${{ steps.secrets.outputs.envfile }}"
           VM="${{ secrets.TARGET_VM_NAME }}"
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
@@ -107,19 +107,23 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_COMMAND=$(cat <<EOF
-            set -euo pipefail
-            APP="${APP}"
-            TARGET_DIR="/opt/apps/${APP}"
-            mkdir -p "\${TARGET_DIR}"
-            tar -xzf "/tmp/\${APP}.tar.gz" -C "\${TARGET_DIR}"
-            mv "/tmp/\${APP}.env" "\${TARGET_DIR}/.env"
-            chmod 600 "\${TARGET_DIR}/.env"
-            systemctl daemon-reload || true
-            systemctl restart "\${APP}.service" || true
-            echo "Deployment completed"
+          REMOTE_COMMAND=$(cat << 'EOF'
+set -euo pipefail
+APP="{{APP}}"
+TARGET_DIR="/opt/apps/${APP}"
+mkdir -p "${TARGET_DIR}"
+tar -xzf "/tmp/${APP}.tar.gz" -C "${TARGET_DIR}"
+mv "/tmp/${APP}.env" "${TARGET_DIR}/.env"
+chmod 600 "${TARGET_DIR}/.env"
+systemctl daemon-reload || true
+systemctl restart "${APP}.service" || true
+echo "Deployment completed"
 EOF
 )
-          gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" \
-            --command="${REMOTE_COMMAND}" --tunnel-through-iap
+
+          REMOTE_COMMAND="${REMOTE_COMMAND//\{\{APP\}\}/${APP}}"
+
+          gcloud compute ssh --quiet --zone="${ZONE}" \
+            "${USER}@${VM}" --tunnel-through-iap \
+            --command="${REMOTE_COMMAND}"
 
