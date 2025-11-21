@@ -68,14 +68,15 @@ jobs:
         run: |
           ssh -i private_key -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }} << 'EOS'
-            set -e
-            cd /home/${DEPLOY_USER}/app
-            if [ ! -d /home/${DEPLOY_USER}/venv ]; then
-              python3 -m venv /home/${DEPLOY_USER}/venv
-            fi
-            source /home/${DEPLOY_USER}/venv/bin/activate
-            pip install --upgrade pip
-            [ -f requirements.txt ] && pip install -r requirements.txt
-            sudo systemctl restart kxn-backend-new01.service
-            sudo systemctl status kxn-backend-new01.service --no-pager || true
+set -e
+cd /home/${DEPLOY_USER}/app
+if [ ! -d /home/${DEPLOY_USER}/venv ]; then
+  python3 -m venv /home/${DEPLOY_USER}/venv
+fi
+source /home/${DEPLOY_USER}/venv/bin/activate
+pip install --upgrade pip
+[ -f requirements.txt ] && pip install -r requirements.txt
+sudo systemctl restart kxn-backend-new01.service
+sudo systemctl status kxn-backend-new01.service --no-pager || true
 EOS
+
