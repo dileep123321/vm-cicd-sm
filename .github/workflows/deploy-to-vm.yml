@@ -6,15 +6,12 @@ on:
       environment:
         description: "Environment to deploy"
         required: true
-        default: "dev"
+        default: "main"
         type: choice
         options:
-          - dev
-          - stage
-          - prod
-
+          - main
       app:
-        description: "Backend application folder name"
+        description: "Backend application folder"
         required: true
         default: "app1"
 
@@ -25,7 +22,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
 
     steps:
       - name: Checkout repository
@@ -47,83 +43,78 @@ jobs:
           set -euo pipefail
           APP="${{ github.event.inputs.app }}"
           mkdir -p dist
-          if [ -f "${APP}/package.json" ]; then
-            cd "${APP}"
-            npm ci
-            npm run build
-            cd -
-          fi
           tar -czf "dist/${APP}.tar.gz" "${APP}"
 
       - name: Fetch secrets from Secret Manager
-        id: secrets
+        id: sm
         run: |
           set -euo pipefail
           APP="${{ github.event.inputs.app }}"
-          ENV="${{ github.event.inputs.environment }}"
           TMPDIR=$(mktemp -d)
           ENVFILE="${TMPDIR}/${APP}.env"
-          umask 077
-          touch "${ENVFILE}"
-          chmod 600 "${ENVFILE}"
-          echo "APP_ENV=${ENV}" >> "${ENVFILE}"
 
-          declare -a MAP=(
-            "DATABASE_URL:myapp-DB-URL-${ENV}"
-            "JWT_SECRET:myapp-JWT-SECRET-${ENV}"
-            "API_KEY:myapp-API-KEY-${ENV}"
+          umask 077
+          touch "$ENVFILE"
+          chmod 600 "$ENVFILE"
+
+          echo "APP_ENV=main" >> "$ENVFILE"
+
+          declare -a SECRETS=(
+            "DATABASE_URL:myapp-DB-URL-main"
           )
 
-          for m in "${MAP[@]}"; do
-            KEY="${m%%:*}"
-            SECRET_NAME="${m##*:}"
-            VALUE=$(gcloud secrets versions access latest --secret="${SECRET_NAME}" --format='get(payload.data)' | base64 --decode)
-            printf '%s="%s"\n' "${KEY}" "${VALUE}" >> "${ENVFILE}"
+          for s in "${SECRETS[@]}"; do
+            KEY="${s%%:*}"
+            NAME="${s##*:}"
+            VAL=$(gcloud secrets versions access latest --secret="${NAME}" --format='get(payload.data)' | base64 --decode)
+            printf '%s="%s"\n' "${KEY}" "${VAL}" >> "$ENVFILE"
           done
 
           echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact and env to VM
+      - name: Upload artifact and .env to VM
         run: |
-          set -euo pipefail
           APP="${{ github.event.inputs.app }}"
-          ART="dist/${APP}.tar.gz"
-          ENVFILE="${{ steps.secrets.outputs.envfile }}"
           VM="${{ secrets.TARGET_VM_NAME }}"
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
+          ENVFILE="${{ steps.sm.outputs.envfile }}"
 
-          gcloud compute scp --quiet --zone="${ZONE}" --tunnel-through-iap \
-            "${ART}" "${USER}@${VM}:/tmp/${APP}.tar.gz"
+          gcloud compute scp --quiet --zone="$ZONE" --tunnel-through-iap \
+            "dist/${APP}.tar.gz" "${USER}@${VM}:/tmp/${APP}.tar.gz"
 
-          gcloud compute scp --quiet --zone="${ZONE}" --tunnel-through-iap \
-            "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env"
+          gcloud compute scp --quiet --zone="$ZONE" --tunnel-through-iap \
+            "$ENVFILE" "${USER}@${VM}:/tmp/${APP}.env"
 
-      - name: Run deploy commands on VM
+      - name: Run remote deploy
         run: |
-          set -euo pipefail
           APP="${{ github.event.inputs.app }}"
           VM="${{ secrets.TARGET_VM_NAME }}"
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_COMMAND=$(cat <<'EOF'
-set -euo pipefail
+          CMD=$(cat <<'EOF'
 APP_REPLACE="{{APP}}"
 TARGET_DIR="/opt/apps/${APP_REPLACE}"
-mkdir -p "${TARGET_DIR}"
-tar -xzf "/tmp/${APP_REPLACE}.tar.gz" -C "${TARGET_DIR}"
-mv "/tmp/${APP_REPLACE}.env" "${TARGET_DIR}/.env"
-chmod 600 "${TARGET_DIR}/.env"
+
+mkdir -p "$TARGET_DIR"
+
+tar -xzf "/tmp/${APP_REPLACE}.tar.gz" -C "$TARGET_DIR"
+
+mv "/tmp/${APP_REPLACE}.env" "$TARGET_DIR/.env"
+chmod 600 "$TARGET_DIR/.env"
+
 systemctl daemon-reload || true
 systemctl restart "${APP_REPLACE}.service" || true
+
 echo "Deployment completed"
 EOF
 )
 
-          REMOTE_COMMAND="${REMOTE_COMMAND//\{\{APP\}\}/${APP}}"
+          CMD="${CMD//\{\{APP\}\}/${APP}}"
 
-          gcloud compute ssh --quiet --zone="${ZONE}" \
-            "${USER}@${VM}" --tunnel-through-iap \
-            --command="${REMOTE_COMMAND}"
+          gcloud compute ssh "${USER}@${VM}" \
+            --zone="$ZONE" \
+            --tunnel-through-iap \
+            --command="$CMD"
 
