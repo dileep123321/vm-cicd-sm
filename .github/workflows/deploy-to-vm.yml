@@ -53,7 +53,7 @@ jobs:
             npm run build
             cd -
           fi
-          tar -czf dist/${APP}.tar.gz ${APP}
+          tar -czf "dist/${APP}.tar.gz" "${APP}"
 
       - name: Fetch secrets from Secret Manager
         id: secrets
@@ -81,7 +81,7 @@ jobs:
             printf '%s="%s"\n' "${KEY}" "${VALUE}" >> "${ENVFILE}"
           done
 
-          echo "envfile=${ENVFILE}" >> $GITHUB_OUTPUT
+          echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact and env to VM
         run: |
@@ -107,16 +107,16 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_COMMAND=$(cat << 'EOF'
+          REMOTE_COMMAND=$(cat <<'EOF'
 set -euo pipefail
-APP="{{APP}}"
-TARGET_DIR="/opt/apps/${APP}"
+APP_REPLACE="{{APP}}"
+TARGET_DIR="/opt/apps/${APP_REPLACE}"
 mkdir -p "${TARGET_DIR}"
-tar -xzf "/tmp/${APP}.tar.gz" -C "${TARGET_DIR}"
-mv "/tmp/${APP}.env" "${TARGET_DIR}/.env"
+tar -xzf "/tmp/${APP_REPLACE}.tar.gz" -C "${TARGET_DIR}"
+mv "/tmp/${APP_REPLACE}.env" "${TARGET_DIR}/.env"
 chmod 600 "${TARGET_DIR}/.env"
 systemctl daemon-reload || true
-systemctl restart "${APP}.service" || true
+systemctl restart "${APP_REPLACE}.service" || true
 echo "Deployment completed"
 EOF
 )
