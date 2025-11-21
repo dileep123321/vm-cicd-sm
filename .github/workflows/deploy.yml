@@ -1,0 +1,73 @@
+name: ci-cd-deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Service Account Key)
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: kxnwork
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Ensure SSH client is present
+        run: sudo apt-get update && sudo apt-get install -y openssh-client
+
+      - name: Fetch SSH private key from Secret Manager
+        run: |
+          gcloud secrets versions access latest \
+            --secret="kxn-ssh-secret-new01" \
+            --project="kxnwork" > private_key
+          chmod 600 private_key
+
+      - name: Fetch environment file from Secret Manager
+        run: |
+          gcloud secrets versions access latest \
+            --secret="kxn-env-secret-new01" \
+            --project="kxnwork" > app.env
+
+      - name: Get VM External IP
+        id: vmip
+        run: |
+          IP=$(gcloud compute instances describe "kxn-backend-vm-new01" \
+              --zone "asia-southeast1-a" \
+              --project "kxnwork" \
+              --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+          echo "VM_IP=$IP" >> $GITHUB_OUTPUT
+
+      - name: Add VM to known_hosts
+        run: ssh-keyscan -H ${{ steps.vmip.outputs.VM_IP }} >> ~/.ssh/known_hosts
+
+      - name: Upload backend files to VM
+        run: |
+          scp -i private_key -o StrictHostKeyChecking=yes \
+            app.py requirements.txt app.env \
+            "deployuser01@${{ steps.vmip.outputs.VM_IP }}:/home/deployuser01/app/"
+
+      - name: Install dependencies & restart service
+        run: |
+          ssh -i private_key -o StrictHostKeyChecking=yes \
+            "deployuser01@${{ steps.vmip.outputs.VM_IP }}" "bash -s" << 'EOS'
+cd /home/deployuser01/app
+
+# Create venv if missing
+if [ ! -d "venv" ]; then
+  python3 -m venv venv
+fi
+
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+sudo systemctl restart kxn-backend-new01.service
+EOS
