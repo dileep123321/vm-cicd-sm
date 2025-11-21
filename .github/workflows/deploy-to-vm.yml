@@ -1,114 +1,81 @@
-name: Deploy to GCE VM (secure, WIF)
+name: Deploy Python Backend to GCP VM
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Environment to deploy"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - stage
-          - prod
-
-      app:
-        description: "Backend application folder"
-        required: true
-        default: "app1"
+  push:
+    branches: ["main"]
 
 permissions:
-  id-token: write
   contents: read
+
+env:
+  PROJECT_ID: kxnwork
+  VM_NAME: kxn-backend-vm-new01
+  ZONE: asia-southeast1-a
+  DEPLOY_USER: deployuser01
+  SECRET_SSH: kxn-ssh-secret-new01
+  SECRET_ENV: kxn-env-secret-new01
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v1
+      - name: Authenticate to GCP
+        uses: google-github-actions/setup-gcloud@v1
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
-          service_account: ${{ secrets.GCP_SA_EMAIL }}
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Configure gcloud
+      - name: Retrieve SSH private key
         run: |
-          gcloud config set project kxnwork
+          gcloud secrets versions access latest \
+            --secret="${SECRET_SSH}" \
+            --project="${PROJECT_ID}" > private_key
+          chmod 600 private_key
 
-      - name: Build artifact
+      - name: Retrieve .env
         run: |
-          set -e
-          APP="${{ github.event.inputs.app }}"
-          mkdir -p dist
-          tar -czf "dist/${APP}.tar.gz" "${APP}"
+          gcloud secrets versions access latest \
+            --secret="${SECRET_ENV}" \
+            --project="${PROJECT_ID}" > app.env
+          echo "::add-mask::$(cat app.env || true)"
 
-      - name: Fetch secrets
-        id: secrets
+      - name: Get VM IP
+        id: vmip
         run: |
-          set -e
-          APP="${{ github.event.inputs.app }}"
-          ENV="${{ github.event.inputs.environment }}"
-          TMPDIR=$(mktemp -d)
-          ENVFILE="${TMPDIR}/${APP}.env"
+          VM_IP=$(gcloud compute instances describe "${VM_NAME}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
+          echo "VM_IP=$VM_IP" >> $GITHUB_OUTPUT
 
-          umask 077
-          touch "${ENVFILE}"
+      - name: Add VM to known_hosts
+        run: ssh-keyscan -H ${{ steps.vmip.outputs.VM_IP }} >> ~/.ssh/known_hosts
 
-          echo "APP_ENV=${ENV}" >> "${ENVFILE}"
-
-          declare -a MAP=(
-            "DATABASE_URL:myapp-DB-URL-${ENV}"
-            "JWT_SECRET:myapp-JWT-SECRET-${ENV}"
-            "API_KEY:myapp-API-KEY-${ENV}"
-          )
-
-          for m in "${MAP[@]}"; do
-            KEY="${m%%:*}"
-            NAME="${m##*:}"
-            VAL=$(gcloud secrets versions access latest --secret="${NAME}" --format='get(payload.data)' | base64 --decode)
-            echo "${KEY}=\"${VAL}\"" >> "${ENVFILE}"
-          done
-
-          echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload to VM
+      - name: Upload app files to VM
         run: |
-          set -e
-          APP="${{ github.event.inputs.app }}"
-          VM="${{ secrets.TARGET_VM_NAME }}"
-          ZONE="${{ secrets.TARGET_VM_ZONE }}"
-          USER="${{ secrets.TARGET_VM_USER }}"
-          ENVFILE="${{ steps.secrets.outputs.envfile }}"
+          scp -i private_key -o StrictHostKeyChecking=yes -r ./* \
+            "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }}:/home/${DEPLOY_USER}/app
 
-          gcloud compute scp --zone="${ZONE}" --tunnel-through-iap \
-            "dist/${APP}.tar.gz" "${USER}@${VM}:/tmp/${APP}.tar.gz"
-
-          gcloud compute scp --zone="${ZONE}" --tunnel-through-iap \
-            "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env"
-
-      - name: Execute deploy script on VM
+      - name: Upload environment file
         run: |
-          set -e
-          APP="${{ github.event.inputs.app }}"
-          VM="${{ secrets.TARGET_VM_NAME }}"
-          ZONE="${{ secrets.TARGET_VM_ZONE }}"
-          USER="${{ secrets.TARGET_VM_USER }}"
+          scp -i private_key -o StrictHostKeyChecking=yes app.env \
+            "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }}:/home/${DEPLOY_USER}/app/.env
 
-          gcloud compute ssh "${USER}@${VM}" \
-            --zone="${ZONE}" --tunnel-through-iap \
-            --command="
-              set -e
-              TARGET_DIR=/opt/apps/${APP}
-              mkdir -p \${TARGET_DIR}
-              tar -xzf /tmp/${APP}.tar.gz -C \${TARGET_DIR}
-              mv /tmp/${APP}.env \${TARGET_DIR}/.env
-              chmod 600 \${TARGET_DIR}/.env
-              sudo systemctl daemon-reload || true
-              sudo systemctl restart ${APP}.service || true
-              echo Deployment completed
+      - name: Install dependencies + Restart service
+        run: |
+          ssh -i private_key -o StrictHostKeyChecking=yes \
+            "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }} << 'EOS'
+            set -e
+            cd /home/${DEPLOY_USER}/app
+            if [ ! -d /home/${DEPLOY_USER}/venv ]; then
+              python3 -m venv /home/${DEPLOY_USER}/venv
+            fi
+            source /home/${DEPLOY_USER}/venv/bin/activate
+            pip install --upgrade pip
+            [ -f requirements.txt ] && pip install -r requirements.txt
+            sudo systemctl restart kxn-backend-new01.service
+            sudo systemctl status kxn-backend-new01.service --no-pager || true
+EOS
