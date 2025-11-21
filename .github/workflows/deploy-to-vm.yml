@@ -64,7 +64,7 @@ jobs:
           chmod 600 "${ENVFILE}"
           echo "APP_ENV=${ENV}" >> "${ENVFILE}"
 
-          # Edit this map to match your Secret Manager secret names
+          # Map of KEY:SECRET_NAME - edit to match your Secret Manager names
           declare -a MAP=(
             "DATABASE_URL:myapp-DB-URL-${ENV}"
             "JWT_SECRET:myapp-JWT-SECRET-${ENV}"
@@ -74,7 +74,6 @@ jobs:
           for m in "${MAP[@]}"; do
             KEY="${m%%:*}"
             SECRET_NAME="${m##*:}"
-            # fetch secret; do NOT print
             SECRET_VAL=$(gcloud secrets versions access latest --secret="${SECRET_NAME}" --format='get(payload.data)' | base64 --decode 2>/dev/null || true)
             if [ -z "${SECRET_VAL}" ]; then
               echo "Secret ${SECRET_NAME} not found or empty" >&2
@@ -95,7 +94,7 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          # copy artifact + env securely; use --tunnel-through-iap for private VMs
+          # Copy artifact and env via IAP tunnel (VM does not need public SSH)
           gcloud compute scp --quiet --zone="${ZONE}" "${ART}" "${USER}@${VM}:/tmp/${APP}.tar.gz" --tunnel-through-iap
           gcloud compute scp --quiet --zone="${ZONE}" "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env" --tunnel-through-iap
 
@@ -123,6 +122,12 @@ jobs:
             echo "deployed ${APP} to ${TARGET_DIR}"
 REMOTE
 )
-          # replace placeholder and run remotely
           REMOTE_CMD=$(echo "${REMOTE_CMD}" | sed "s/{{APP}}/${APP}/g")
           gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD}" --tunnel-through-iap
+
+      - name: Cleanup temporary runner files
+        if: always()
+        run: |
+          set -euo pipefail
+          APP="${{ github.event.inputs.app }}"
+          rm -f dist/${APP}.tar.gz
