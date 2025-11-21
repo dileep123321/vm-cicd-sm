@@ -64,10 +64,9 @@ jobs:
           scp -i private_key -o StrictHostKeyChecking=yes app.env \
             "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }}:/home/${DEPLOY_USER}/app/.env
 
-      - name: Install dependencies + Restart service
+      - name: Install dependencies and restart service
         run: |
-          ssh -i private_key -o StrictHostKeyChecking=yes \
-            "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }} << 'EOS'
+          ssh -i private_key -o StrictHostKeyChecking=yes "${DEPLOY_USER}"@${{ steps.vmip.outputs.VM_IP }} << 'EOF'
 set -e
 cd /home/${DEPLOY_USER}/app
 if [ ! -d /home/${DEPLOY_USER}/venv ]; then
@@ -78,5 +77,5 @@ pip install --upgrade pip
 [ -f requirements.txt ] && pip install -r requirements.txt
 sudo systemctl restart kxn-backend-new01.service
 sudo systemctl status kxn-backend-new01.service --no-pager || true
-EOS
+EOF
 
